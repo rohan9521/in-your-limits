@@ -1,40 +1,28 @@
 # In Your Limits
 
-A local-first LLM gateway that compresses both sides of a request:
+The gateway now supports automatic provider selection. Add any provider key and the app will use it; when multiple keys are configured, automatic routing tries Gemini first, then OpenAI, then Anthropic, and falls back to the next configured provider if a call fails.
 
-1. The browser sends a prompt to the local API server.
-2. The local Ollama model rewrites the request without changing its meaning.
-3. The compressed request is sent to OpenAI, Anthropic, or Google AI using the selected API key.
-4. The provider response is sent through Ollama again and the compact answer is returned to the browser.
+The local Ollama model compresses the request before the provider call and compresses the response before it reaches the browser.
 
 ## Run locally
-
-Install Ollama and pull a model first:
 
 ```bash
 ollama serve
 ollama pull llama3.2:3b
-```
-
-Then run the app:
-
-```bash
 npm install
 cp .env.example .env
 npm run dev
 ```
 
-Open `http://localhost:5173`, configure the local URL/model and one provider API key, then send a request.
+Open `http://localhost:5173`, add a Gemini key under **Settings**, leave **Route to** set to **Automatic**, and send a request. You can explicitly select a provider when needed.
 
-## API
+## Provider routing
 
-The Node API server listens on `http://localhost:8787` and exposes:
-
-- `GET /api/health`
-- `POST /api/chat`
-
-`POST /api/chat` performs request compression, provider routing, and response compression. `targetRatio` defaults to `0.55`; it is a target rather than a hard guarantee because the local model preserves meaning over a strict token count.
+- **Automatic**: uses configured keys in this order: Gemini, OpenAI, Anthropic.
+- **Explicit provider**: uses only the selected provider.
+- If an available provider fails, automatic mode tries the next configured provider.
+- The response identifies which provider was used.
 
 ## Security
 
-This is a local development gateway. Provider keys are kept in browser storage and sent to the local server only when a request is made. For production, move key storage to a secured backend, authenticate the local API, add rate limits, and never expose provider keys to an untrusted frontend.
+Provider keys are stored in browser storage and sent only to the local API server for a request. This is for local development; use a secured authenticated backend and server-side secret storage in production.
