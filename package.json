@@ -1,10 +1,10 @@
 {
   "name": "in-your-limits",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "scripts": {
-    "dev": "concurrently \"node server.js\" \"vite\"",
+    "dev": "concurrently -k \"node server.js\" \"vite\"",
     "server": "node server.js",
     "build": "vite build",
     "preview": "vite preview"

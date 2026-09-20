@@ -43,7 +43,7 @@ async function requestWithAvailableProvider({ provider, apiKeys, models, message
   const candidates = provider && provider !== 'auto' ? [provider] : PROVIDER_ORDER
   const failures = []
   for (const candidate of candidates) {
-    const key = apiKeys?.[candidate]?.trim()
+    const key = typeof apiKeys?.[candidate] === 'string' ? apiKeys[candidate].trim() : ''
     if (!key) continue
     try {
       const text = await callProvider(candidate, key, models?.[candidate], messages)
@@ -51,24 +51,26 @@ async function requestWithAvailableProvider({ provider, apiKeys, models, message
       return { provider: candidate, text }
     } catch (error) { failures.push(`${candidate}: ${error.message}`) }
   }
-  if (!candidates.some(candidate => apiKeys?.[candidate]?.trim())) throw new Error('No provider API key is configured. Add at least one key in Settings.')
+  if (!candidates.some(candidate => typeof apiKeys?.[candidate] === 'string' && apiKeys[candidate].trim())) throw new Error('No provider API key is configured. Add at least one key in Settings.')
   throw new Error(`All configured providers failed. ${failures.join(' | ')}`)
 }
 
 const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') return send(res, 204, {})
-  if (req.method === 'GET' && req.url === '/api/health') return send(res, 200, { ok: true, localUrl: DEFAULT_LOCAL_URL })
+  if (req.method === 'GET' && (req.url === '/api/health' || req.url === '/api/version')) return send(res, 200, { ok: true, version: 'auto-routing-v2', localUrl: DEFAULT_LOCAL_URL })
   if (req.method !== 'POST' || !req.url.startsWith('/api/chat')) return send(res, 404, { error: 'Not found' })
   try {
     const body = await readBody(req)
     const { provider = 'auto', apiKeys, apiKey, model, models, localUrl = DEFAULT_LOCAL_URL, localModel = 'llama3.2:3b', messages, compress = true, targetRatio = 0.55 } = body
-    const normalizedKeys = apiKeys || (provider !== 'auto' && apiKey ? { [provider]: apiKey } : {})
+    // Accept both the current apiKeys object and the older single-provider apiKey format.
+    const normalizedKeys = apiKeys && typeof apiKeys === 'object' ? apiKeys : (provider !== 'auto' && apiKey ? { [provider]: apiKey } : {})
     if (!Array.isArray(messages) || !messages.length) return send(res, 400, { error: 'At least one message is required.' })
     const cleanMessages = messages.map(m => ({ role: m.role, content: String(m.content || '') })).filter(m => ['system', 'user', 'assistant'].includes(m.role) && m.content)
+    if (!cleanMessages.length) return send(res, 400, { error: 'At least one non-empty message is required.' })
     const requestMessages = compress ? await Promise.all(cleanMessages.map(async m => m.role === 'user' ? { ...m, content: await compressWithLocal({ localUrl, localModel, text: m.content, direction: 'request', targetRatio }) } : m)) : cleanMessages
     const result = await requestWithAvailableProvider({ provider, apiKeys: normalizedKeys, models: models || { [provider]: model }, messages: requestMessages })
     const responseText = compress ? await compressWithLocal({ localUrl, localModel, text: result.text, direction: 'response', targetRatio }) : result.text
     send(res, 200, { provider: result.provider, response: responseText, originalResponse: result.text, compressed: compress })
   } catch (error) { send(res, 502, { error: error.message || 'Request failed.' }) }
 })
-server.listen(PORT, () => console.log(`API server listening on http://localhost:${PORT}`))
+server.listen(PORT, () => console.log(`API server listening on http://localhost:${PORT} (automatic provider routing enabled)`))
