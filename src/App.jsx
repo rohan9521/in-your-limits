@@ -1,17 +1,20 @@
 import { useCallback, useState } from 'react'
 import { PROVIDERS } from './config/providers'
 import { ConnectionBanner } from './components/ConnectionBanner'
+import { AnalyticsPanel } from './components/AnalyticsPanel'
 import { NextSteps } from './components/NextSteps'
 import { RequestComposer } from './components/RequestComposer'
 import { SettingsModal } from './components/SettingsModal'
 import { Sidebar } from './components/Sidebar'
 import { StatsGrid } from './components/StatsGrid'
 import { Topbar } from './components/Topbar'
+import { ViewTabs } from './components/ViewTabs'
 import { useChatRequest } from './hooks/useChatRequest'
 import { useConnectionSettings } from './hooks/useConnectionSettings'
 import { useLocalModelStatus } from './hooks/useLocalModelStatus'
 
 export function App() {
+  const [activeView, setActiveView] = useState('overview')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsDraft, setSettingsDraft] = useState(null)
   const [prompt, setPrompt] = useState('')
@@ -53,14 +56,17 @@ export function App() {
 
   return (
     <div className="app-shell">
-      <Sidebar onOpenSettings={openSettings} />
+      <Sidebar activeView={activeView} onViewChange={setActiveView} onOpenSettings={openSettings} />
       <main className="main-content">
-        <Topbar onOpenSettings={openSettings} />
-        <ConnectionBanner localModel={connections.localModel} localUrl={connections.localUrl} status={localModel.status} onRetry={localModel.retry} />
-        {chat.notice && <div className="notice" role="status">{chat.notice}</div>}
-        <StatsGrid connectedCount={connections.connectedProviders.length} providerCount={PROVIDERS.length} localStatus={localModel.status} localModel={connections.localModel} />
-        <RequestComposer prompt={prompt} provider={selectedProvider} busy={chat.busy} response={chat.response} onPromptChange={setPrompt} onProviderChange={setSelectedProvider} onSubmit={() => chat.submit({ prompt, provider: selectedProvider })} />
-        <NextSteps onOpenSettings={openSettings} />
+        <Topbar activeView={activeView} onOpenSettings={openSettings} />
+        <ViewTabs activeView={activeView} onViewChange={setActiveView} />
+        {activeView === 'overview' ? <>
+          <ConnectionBanner localModel={connections.localModel} localUrl={connections.localUrl} status={localModel.status} onRetry={localModel.retry} />
+          {chat.notice && <div className="notice" role="status">{chat.notice}</div>}
+          <StatsGrid connectedCount={connections.connectedProviders.length} providerCount={PROVIDERS.length} localStatus={localModel.status} localModel={connections.localModel} />
+          <RequestComposer prompt={prompt} provider={selectedProvider} busy={chat.busy} records={chat.records} onPromptChange={setPrompt} onProviderChange={setSelectedProvider} onSubmit={() => chat.submit({ prompt, provider: selectedProvider })} />
+          <NextSteps onOpenSettings={openSettings} />
+        </> : <AnalyticsPanel records={chat.records} onClear={chat.clearHistory} />}
       </main>
       {settingsOpen && settingsDraft && <SettingsModal settings={settingsDraft} onChangeSetting={updateDraftSetting} onChangeKey={updateDraftKey} onSave={saveConnections} onClose={closeSettings} />}
     </div>

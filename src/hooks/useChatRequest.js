@@ -1,6 +1,11 @@
 import { useState } from "react";
 import { getProviderName } from "../config/providers";
 import { sendChatRequest } from "../services/chatService";
+import {
+  clearAnalytics,
+  loadAnalytics,
+  saveAnalytics,
+} from "../services/analyticsStorage";
 
 export function useChatRequest({
   keys,
@@ -10,10 +15,12 @@ export function useChatRequest({
   localStatus,
 }) {
   const [response, setResponse] = useState("");
+  const [records, setRecords] = useState(() => loadAnalytics());
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
 
   async function submit({ prompt, provider }) {
+    const requestStartedAt = new Date().toISOString();
     setNotice("");
     setResponse("");
     if (!prompt.trim()) {
@@ -40,10 +47,55 @@ export function useChatRequest({
         localModel,
         prompt,
       });
+      if (typeof data.response !== "string" || !data.response) {
+        throw new Error("The provider returned an empty response.");
+      }
+      const request = {
+        original:
+          typeof data.request?.original === "string"
+            ? data.request.original
+            : prompt,
+        compressed:
+          typeof data.request?.compressed === "string"
+            ? data.request.compressed
+            : prompt,
+      };
+      const tokenStats = {
+        request: {
+          suppressedTokens: Math.max(
+            0,
+            Number(data.tokenStats?.request?.suppressedTokens) || 0,
+          ),
+        },
+        response: {
+          suppressedTokens: Math.max(
+            0,
+            Number(data.tokenStats?.response?.suppressedTokens) || 0,
+          ),
+        },
+      };
       setResponse(data.response);
       setNotice(
         `Request and response compressed locally. Used ${getProviderName(data.provider)}.`,
       );
+      const record = {
+        id:
+          globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`,
+        timestamp: requestStartedAt,
+        provider: data.provider,
+        providerName: getProviderName(data.provider),
+        request,
+        response: {
+          original: data.originalResponse || data.response,
+          compressed: data.response,
+        },
+        tokenStats,
+      };
+      setRecords((current) => {
+        const nextRecords = [...current, record].slice(-100);
+        saveAnalytics(nextRecords);
+        return nextRecords;
+      });
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Request failed");
     } finally {
@@ -54,5 +106,10 @@ export function useChatRequest({
     setNotice(message);
   }
 
-  return { response, notice, busy, submit, showNotice };
+  function clearHistory() {
+    clearAnalytics();
+    setRecords([]);
+  }
+
+  return { response, records, notice, busy, submit, showNotice, clearHistory };
 }

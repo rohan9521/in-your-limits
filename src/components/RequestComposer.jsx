@@ -1,6 +1,7 @@
 import { PROVIDERS } from '../config/providers'
+import { ChatTranscript } from './ChatTranscript'
 
-export function RequestComposer({ prompt, provider, busy, response, onPromptChange, onProviderChange, onSubmit }) {
+export function RequestComposer({ prompt, provider, busy, records, onPromptChange, onProviderChange, onSubmit }) {
   return (
     <section className="workspace">
       <div className="section-heading">
@@ -12,7 +13,7 @@ export function RequestComposer({ prompt, provider, busy, response, onPromptChan
         <textarea id="prompt" value={prompt} onChange={(event) => onPromptChange(event.target.value)} placeholder="Ask anything. Your local model will reduce it before sending..." rows="7" />
         <div className="composer-footer"><span>{prompt.length} characters · request + response compression enabled</span><button className="primary-button" type="submit" disabled={busy}>{busy ? 'Compressing...' : 'Send request'} <span>→</span></button></div>
       </form>
-      {response && <div className="result"><div className="result-heading"><span className="success-icon">✓</span><strong>Compressed response</strong><span className="muted">Returned by the selected provider</span></div><p>{response}</p></div>}
+      <ChatTranscript records={records} busy={busy} />
     </section>
   )
 }
