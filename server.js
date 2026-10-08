@@ -1,8 +1,35 @@
 import http from "node:http";
 
-const PORT = Number(process.env.PORT || 8787);
+const PORT = Number(process.env.API_PORT || 8787);
 const DEFAULT_LOCAL_URL = process.env.LOCAL_LLM_URL || "http://localhost:11434";
-const PROVIDER_ORDER = ["google", "openai", "anthropic"];
+const PROVIDER_ORDER = ["google", "openai", "anthropic", "local"];
+const MODEL_REGISTRY = {
+  google: {
+    context_window: 1_048_576,
+    max_output_tokens: 8192,
+    supports_tools: true,
+    default_model: "gemini-2.0-flash",
+  },
+  openai: {
+    context_window: 128000,
+    max_output_tokens: 4096,
+    supports_tools: true,
+    default_model: "gpt-4o-mini",
+  },
+  anthropic: {
+    context_window: 200000,
+    max_output_tokens: 8192,
+    supports_tools: true,
+    default_model: "claude-3-5-haiku-latest",
+  },
+  local: {
+    context_window: 32768,
+    max_output_tokens: 4096,
+    supports_tools: false,
+    default_model: "llama3:8b",
+  },
+};
+const CONVERSATIONS = new Map();
 const jsonHeaders = {
   "content-type": "application/json; charset=utf-8",
   "access-control-allow-origin": "http://localhost:5173",
@@ -14,15 +41,35 @@ function send(res, status, body) {
   res.writeHead(status, jsonHeaders);
   res.end(JSON.stringify(body));
 }
+
 async function readBody(req) {
   let raw = "";
   for await (const chunk of req) raw += chunk;
   if (raw.length > 1_000_000) throw new Error("Request is too large.");
   return raw ? JSON.parse(raw) : {};
 }
+
 function estimateTokens(text) {
   return Math.max(0, Math.ceil(String(text || "").length / 4));
 }
+
+function normalizeLocalUrl(localUrl) {
+  const value = String(localUrl || "").trim();
+  const withProtocol = /^[a-z][a-z\d+.-]*:\/\//i.test(value)
+    ? value
+    : `http://${value}`;
+  let parsed;
+  try {
+    parsed = new URL(withProtocol);
+  } catch {
+    throw new Error(`Invalid Ollama URL: ${value || "(empty)"}`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("Ollama URL must use http:// or https://.");
+  }
+  return parsed.href.replace(/\/+$/, "");
+}
+
 function compressionStats(original, compressed) {
   const originalTokens = estimateTokens(original);
   const compressedTokens = estimateTokens(compressed);
@@ -33,8 +80,95 @@ function compressionStats(original, compressed) {
   };
 }
 
+function normalizeMessages(messages) {
+  return (Array.isArray(messages) ? messages : [])
+    .map((message) => ({
+      role: String(message?.role || "user"),
+      content: String(message?.content || ""),
+      model: typeof message?.model === "string" ? message.model : undefined,
+    }))
+    .filter(
+      (message) => ["system", "user", "assistant"].includes(message.role) && message.content,
+    );
+}
+
+function createConversation(conversationId) {
+  return {
+    conversationId,
+    createdAt: new Date().toISOString(),
+    activeModel: "auto",
+    summary: "",
+    summarizedThrough: 0,
+    version: 1,
+    messages: [],
+  };
+}
+
+function getConversation(conversationId) {
+  const id = String(
+    conversationId || `conversation-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`,
+  );
+  if (!CONVERSATIONS.has(id)) CONVERSATIONS.set(id, createConversation(id));
+  return CONVERSATIONS.get(id);
+}
+
+function buildContextFailure(errorMessage) {
+  const normalized = String(errorMessage || "").toLowerCase();
+  if (
+    normalized.includes("context") ||
+    normalized.includes("too many tokens") ||
+    normalized.includes("maximum context") ||
+    normalized.includes("prompt is too long") ||
+    normalized.includes("token limit")
+  ) {
+    return "context_window";
+  }
+  if (
+    normalized.includes("output token") ||
+    normalized.includes("max_tokens") ||
+    normalized.includes("output limit") ||
+    normalized.includes("maximum output")
+  ) {
+    return "output_limit";
+  }
+  if (normalized.includes("rate limit") || normalized.includes("429")) return "rate_limit";
+  if (
+    normalized.includes("authentication") ||
+    normalized.includes("unauthorized") ||
+    normalized.includes("api key") ||
+    normalized.includes("invalid key")
+  ) {
+    return "auth_error";
+  }
+  return "provider_error";
+}
+
+function getProviderApiKey(candidate, apiKeys) {
+  const value = apiKeys?.[candidate];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function getModelChoice(provider, models, candidate) {
+  const modelValue = models?.[candidate] || models?.[provider];
+  if (typeof modelValue === "string" && modelValue.trim()) return modelValue;
+  return MODEL_REGISTRY[provider]?.default_model || MODEL_REGISTRY[candidate]?.default_model || "";
+}
+
+function getModelLimits(provider) {
+  return MODEL_REGISTRY[provider] || MODEL_REGISTRY.openai;
+}
+
+function fitsModelContext(messages, provider) {
+  const modelLimits = getModelLimits(provider);
+  const serialized = JSON.stringify(messages || []);
+  const systemReserve = 2000;
+  const safetyMargin = modelLimits.context_window * 0.15;
+  const inputBudget = modelLimits.context_window - modelLimits.max_output_tokens - systemReserve - safetyMargin;
+  return estimateTokens(serialized) <= Math.max(1, inputBudget);
+}
+
 async function localGenerate(localUrl, model, prompt) {
-  const r = await fetch(`${localUrl.replace(/\/$/, "")}/api/generate`, {
+  const r = await fetch(`${normalizeLocalUrl(localUrl)}/api/generate`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -46,18 +180,11 @@ async function localGenerate(localUrl, model, prompt) {
   });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.error || `Local LLM returned ${r.status}`);
-  if (!data.response)
-    throw new Error("The local LLM returned an empty response.");
+  if (!data.response) throw new Error("The local LLM returned an empty response.");
   return data.response.trim();
 }
 
-async function compressWithLocal({
-  localUrl,
-  localModel,
-  text,
-  direction,
-  targetRatio = 0.55,
-}) {
+async function compressWithLocal({ localUrl, localModel, text, direction, targetRatio = 0.55 }) {
   const task =
     direction === "request"
       ? "Rewrite the request compactly while preserving every requirement, constraint, number, named entity, and desired output format."
@@ -69,25 +196,114 @@ async function compressWithLocal({
   );
 }
 
-async function callProvider(provider, apiKey, model, messages) {
+async function summarizeConversation({
+  localUrl,
+  localModel,
+  messages,
+  previousSummary = "",
+}) {
+  if (!messages?.length && !previousSummary) return "";
+  const text = [
+    previousSummary ? `Existing conversation summary:\n${previousSummary}` : "",
+    ...(messages || []).map(
+      (message) => `${message.role.toUpperCase()}: ${message.content}`,
+    ),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  return localGenerate(
+    localUrl,
+    localModel,
+    `You are a memory-management assistant for a multi-model chat system. Produce a compact but faithful summary of the conversation that preserves the user's goals, constraints, decisions, risks, and key facts. Incorporate the existing summary without losing relevant details. Return only the summary.\n\n${text}`,
+  );
+}
+
+async function buildContextForModel({
+  provider,
+  conversation,
+  localUrl,
+  localModel,
+  currentMessages,
+}) {
+  const history = normalizeMessages(conversation.messages || []);
+  if (currentMessages?.length) {
+    history.splice(
+      history.length - currentMessages.length,
+      currentMessages.length,
+      ...currentMessages,
+    );
+  }
+  if (!history.length) return [];
+
+  let keepCount = Math.min(12, history.length);
+  while (keepCount > 0) {
+    const summarizeUntil = history.length - keepCount;
+    if (summarizeUntil > conversation.summarizedThrough) {
+      conversation.summary = await summarizeConversation({
+        localUrl,
+        localModel,
+        messages: history.slice(conversation.summarizedThrough, summarizeUntil),
+        previousSummary: conversation.summary,
+      });
+      conversation.summarizedThrough = summarizeUntil;
+    }
+
+    const builtMessages = [];
+    if (conversation.summary) {
+      builtMessages.push({
+        role: "system",
+        content: `Conversation summary: ${conversation.summary}`,
+      });
+    }
+    builtMessages.push(...history.slice(summarizeUntil));
+    if (fitsModelContext(builtMessages, provider)) return builtMessages;
+
+    keepCount -= 1;
+  }
+
+  throw new Error("Context window exceeded for this request.");
+}
+
+async function callProvider(provider, apiKey, model, messages, localUrl) {
+  const normalizedMessages = normalizeMessages(messages);
+
+  if (provider === "local") {
+    const r = await fetch(`${normalizeLocalUrl(localUrl)}/api/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: model || MODEL_REGISTRY.local.default_model,
+        messages: normalizedMessages.map(({ role, content }) => ({ role, content })),
+        stream: false,
+        options: { temperature: 0.1 },
+      }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || `Local Ollama returned ${r.status}`);
+    return d.message?.content || "";
+  }
+
   if (provider === "openai") {
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
-        authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${apiKey}`,
         "content-type": "application/json",
       },
-      body: JSON.stringify({ model: model || "gpt-4o-mini", messages }),
+      body: JSON.stringify({
+        model: model || MODEL_REGISTRY.openai.default_model,
+        messages: normalizedMessages,
+      }),
     });
     const d = await r.json().catch(() => ({}));
-    if (!r.ok)
-      throw new Error(d.error?.message || `OpenAI returned ${r.status}`);
+    if (!r.ok) throw new Error(d.error?.message || `OpenAI returned ${r.status}`);
     return d.choices?.[0]?.message?.content || "";
   }
+
   if (provider === "anthropic") {
-    const system = messages
-      .filter((m) => m.role === "system")
-      .map((m) => m.content)
+    const system = normalizedMessages
+      .filter((message) => message.role === "system")
+      .map((message) => message.content)
       .join("\n");
     const r = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -97,39 +313,44 @@ async function callProvider(provider, apiKey, model, messages) {
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        model: model || "claude-3-5-haiku-latest",
-        max_tokens: 4096,
+        model: model || MODEL_REGISTRY.anthropic.default_model,
+        max_tokens: MODEL_REGISTRY.anthropic.max_output_tokens,
         ...(system ? { system } : {}),
-        messages: messages.filter((m) => m.role !== "system"),
+        messages: normalizedMessages.filter((message) => message.role !== "system"),
       }),
     });
     const d = await r.json().catch(() => ({}));
-    if (!r.ok)
-      throw new Error(d.error?.message || `Anthropic returned ${r.status}`);
-    return d.content?.map((x) => x.text || "").join("") || "";
+    if (!r.ok) throw new Error(d.error?.message || `Anthropic returned ${r.status}`);
+    return d.content?.map((entry) => entry.text || "").join("") || "";
   }
+
   if (provider === "google") {
-    const contents = messages
-      .filter((m) => m.role !== "system")
-      .map((m) => ({
-        role: m.role === "assistant" ? "model" : "user",
-        parts: [{ text: m.content }],
+    const system = normalizedMessages
+      .filter((message) => message.role === "system")
+      .map((message) => message.content)
+      .join("\n");
+    const contents = normalizedMessages
+      .filter((message) => message.role !== "system")
+      .map((message) => ({
+        role: message.role === "assistant" ? "model" : "user",
+        parts: [{ text: message.content }],
       }));
     const r = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model || "gemini-2.0-flash"}:generateContent?key=${encodeURIComponent(apiKey)}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${model || MODEL_REGISTRY.google.default_model}:generateContent?key=${encodeURIComponent(apiKey)}`,
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ contents }),
+        body: JSON.stringify({
+          contents,
+          ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
+        }),
       },
     );
     const d = await r.json().catch(() => ({}));
-    if (!r.ok)
-      throw new Error(d.error?.message || `Google AI returned ${r.status}`);
-    return (
-      d.candidates?.[0]?.content?.parts?.map((x) => x.text || "").join("") || ""
-    );
+    if (!r.ok) throw new Error(d.error?.message || `Google AI returned ${r.status}`);
+    return d.candidates?.[0]?.content?.parts?.map((entry) => entry.text || "").join("") || "";
   }
+
   throw new Error(`Unsupported provider: ${provider}`);
 }
 
@@ -138,52 +359,87 @@ async function requestWithAvailableProvider({
   apiKeys,
   models,
   messages,
+  localUrl,
+  localModel,
+  conversation,
 }) {
   const candidates =
-    provider && provider !== "auto" ? [provider] : PROVIDER_ORDER;
+    provider && provider !== "auto"
+      ? [provider, ...PROVIDER_ORDER.filter((candidate) => candidate !== provider)]
+      : PROVIDER_ORDER;
   const failures = [];
+  const attemptedProviders = [];
+
   for (const candidate of candidates) {
-    const key =
-      typeof apiKeys?.[candidate] === "string" ? apiKeys[candidate].trim() : "";
-    if (!key) continue;
+    const key = getProviderApiKey(candidate, apiKeys);
+    if (candidate !== "local" && !key) continue;
+    attemptedProviders.push(candidate);
+
     try {
+      const contextMessages = await buildContextForModel({
+        provider: candidate,
+        conversation,
+        localUrl,
+        localModel,
+        currentMessages: messages,
+      });
+      if (!fitsModelContext(contextMessages, candidate)) {
+        failures.push(`${candidate}: context window exceeded for this request.`);
+        continue;
+      }
+
+      const selectedModel =
+        candidate === "local"
+          ? localModel
+          : getModelChoice(candidate, models, candidate);
       const text = await callProvider(
         candidate,
         key,
-        models?.[candidate],
-        messages,
+        selectedModel,
+        contextMessages,
+        localUrl,
       );
       if (!text) throw new Error("Provider returned an empty response.");
-      return { provider: candidate, text };
+      return { provider: candidate, text, attemptedProviders };
     } catch (error) {
+      const failureType = buildContextFailure(error.message);
+      if (failureType === "context_window") {
+        failures.push(`${candidate}: context window exceeded for this request.`);
+        continue;
+      }
+      if (failureType === "output_limit") {
+        failures.push(`${candidate}: output limit reached.`);
+        continue;
+      }
       failures.push(`${candidate}: ${error.message}`);
     }
   }
-  if (
-    !candidates.some(
-      (candidate) =>
-        typeof apiKeys?.[candidate] === "string" && apiKeys[candidate].trim(),
-    )
-  )
-    throw new Error(
-      "No provider API key is configured. Add at least one key in Settings.",
-    );
-  throw new Error(`All configured providers failed. ${failures.join(" | ")}`);
+
+  if (!attemptedProviders.length) {
+    throw new Error("No provider API key is configured. Add at least one key in Settings.");
+  }
+
+  const detail = failures.length ? failures.join(" | ") : "provider error";
+  throw new Error(`All configured providers failed. ${detail}`);
 }
 
 const server = http.createServer(async (req, res) => {
   if (req.method === "OPTIONS") return send(res, 204, {});
-  if (
-    req.method === "GET" &&
-    (req.url === "/api/health" || req.url === "/api/version")
-  )
+
+  if (req.method === "GET" && (req.url === "/api/health" || req.url === "/api/version")) {
     return send(res, 200, {
       ok: true,
-      version: "auto-routing-v2",
+      version: "context-routing-v2",
       localUrl: DEFAULT_LOCAL_URL,
     });
-  if (req.method !== "POST" || !req.url.startsWith("/api/chat"))
+  }
+
+  if (req.method !== "POST" || !req.url.startsWith("/api/chat")) {
     return send(res, 404, { error: "Not found" });
+  }
+
+  let conversation;
+  let pendingMessageCount = 0;
   try {
     const body = await readBody(req);
     const {
@@ -193,53 +449,63 @@ const server = http.createServer(async (req, res) => {
       model,
       models,
       localUrl = DEFAULT_LOCAL_URL,
-      localModel = "llama3.2:3b",
+      localModel = "llama3:8b",
       messages,
+      conversationId,
       compress = true,
       targetRatio = 0.55,
     } = body;
-    // Accept both the current apiKeys object and the older single-provider apiKey format.
+
     const normalizedKeys =
       apiKeys && typeof apiKeys === "object"
         ? apiKeys
         : provider !== "auto" && apiKey
           ? { [provider]: apiKey }
           : {};
-    if (!Array.isArray(messages) || !messages.length)
+
+    if (!Array.isArray(messages) || !messages.length) {
       return send(res, 400, { error: "At least one message is required." });
-    const cleanMessages = messages
-      .map((m) => ({ role: m.role, content: String(m.content || "") }))
-      .filter(
-        (m) => ["system", "user", "assistant"].includes(m.role) && m.content,
-      );
-    if (!cleanMessages.length)
-      return send(res, 400, {
-        error: "At least one non-empty message is required.",
-      });
+    }
+
+    conversation = getConversation(conversationId);
+    const cleanMessages = normalizeMessages(messages);
+    if (!cleanMessages.length) {
+      return send(res, 400, { error: "At least one non-empty message is required." });
+    }
+
+    conversation.messages.push(...cleanMessages);
+    pendingMessageCount = cleanMessages.length;
+    conversation.activeModel = provider || "auto";
+
     const requestMessages = compress
       ? await Promise.all(
-          cleanMessages.map(async (m) =>
-            m.role === "user"
+          cleanMessages.map(async (message) =>
+            message.role === "user"
               ? {
-                  ...m,
+                  ...message,
                   content: await compressWithLocal({
                     localUrl,
                     localModel,
-                    text: m.content,
+                    text: message.content,
                     direction: "request",
                     targetRatio,
                   }),
                 }
-              : m,
+              : message,
           ),
         )
       : cleanMessages;
+
     const result = await requestWithAvailableProvider({
       provider,
       apiKeys: normalizedKeys,
       models: models || { [provider]: model },
       messages: requestMessages,
+      localUrl,
+      localModel,
+      conversation,
     });
+
     const responseText = compress
       ? await compressWithLocal({
           localUrl,
@@ -249,6 +515,7 @@ const server = http.createServer(async (req, res) => {
           targetRatio,
         })
       : result.text;
+
     const originalRequest = cleanMessages
       .filter(({ role }) => role === "user")
       .map(({ content }) => content)
@@ -257,23 +524,37 @@ const server = http.createServer(async (req, res) => {
       .filter(({ role }) => role === "user")
       .map(({ content }) => content)
       .join("\n");
+
+    conversation.messages.push({ role: "assistant", content: result.text, model: result.provider });
+    pendingMessageCount = 0;
+
     send(res, 200, {
+      conversationId: conversation.conversationId,
       provider: result.provider,
+      attemptedProviders: result.attemptedProviders,
       response: responseText,
       originalResponse: result.text,
       compressed: compress,
       request: { original: originalRequest, compressed: compressedRequest },
+      context: {
+        summary: conversation.summary,
+        messageCount: conversation.messages.length,
+      },
       tokenStats: {
         request: compressionStats(originalRequest, compressedRequest),
         response: compressionStats(result.text, responseText),
       },
     });
   } catch (error) {
+    if (conversation && pendingMessageCount) {
+      conversation.messages.splice(-pendingMessageCount, pendingMessageCount);
+    }
     send(res, 502, { error: error.message || "Request failed." });
   }
 });
-server.listen(PORT, () =>
+
+server.listen(PORT, () => {
   console.log(
-    `API server listening on http://localhost:${PORT} (automatic provider routing enabled)`,
-  ),
-);
+    `API server listening on http://localhost:${PORT} (context-aware model routing enabled)`,
+  );
+});

@@ -18,6 +18,13 @@ export function useChatRequest({
   const [records, setRecords] = useState(() => loadAnalytics());
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
+  const [conversationId, setConversationId] = useState(() => {
+    const existing = sessionStorage.getItem("iYL.conversationId");
+    if (existing) return existing;
+    const id = `conv-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+    sessionStorage.setItem("iYL.conversationId", id);
+    return id;
+  });
 
   async function submit({ prompt, provider }) {
     const requestStartedAt = new Date().toISOString();
@@ -27,7 +34,7 @@ export function useChatRequest({
       setNotice("Add a prompt before sending it.");
       return;
     }
-    if (!connectedProviders.length) {
+    if (!connectedProviders.length && provider !== "local" && provider !== "auto") {
       setNotice("Add at least one provider API key in Settings.");
       return;
     }
@@ -46,9 +53,14 @@ export function useChatRequest({
         localUrl,
         localModel,
         prompt,
+        conversationId,
       });
       if (typeof data.response !== "string" || !data.response) {
         throw new Error("The provider returned an empty response.");
+      }
+      if (data.conversationId) {
+        setConversationId(data.conversationId);
+        sessionStorage.setItem("iYL.conversationId", data.conversationId);
       }
       const request = {
         original:
@@ -75,8 +87,13 @@ export function useChatRequest({
         },
       };
       setResponse(data.response);
+      const fallbackUsed =
+        Array.isArray(data.attemptedProviders) &&
+        data.attemptedProviders[0] !== data.provider;
       setNotice(
-        `Request and response compressed locally. Used ${getProviderName(data.provider)}.`,
+        fallbackUsed
+          ? `Automatically switched to ${getProviderName(data.provider)} with your conversation history preserved.`
+          : `Request and response compressed locally. Used ${getProviderName(data.provider)}.`,
       );
       const record = {
         id:
@@ -89,6 +106,7 @@ export function useChatRequest({
           original: data.originalResponse || data.response,
           compressed: data.response,
         },
+        context: data.context,
         tokenStats,
       };
       setRecords((current) => {

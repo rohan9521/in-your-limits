@@ -1,8 +1,8 @@
 export function Topbar({ activeView, onOpenSettings }) {
   return (
-    <header className="topbar">
-      <div><div className="eyebrow">WORKSPACE / {activeView.toUpperCase()}</div><h1>Make every token count.</h1></div>
-      <button className="settings-button" type="button" onClick={onOpenSettings}>⚙ Settings</button>
+    <header className="topbar chat-topbar">
+      <div><div className="chat-title">{activeView === 'overview' ? 'In Your Limits' : 'Analytics'}</div><span className="chat-subtitle">{activeView === 'overview' ? 'A private, context-aware AI chat' : 'Your request history and token savings'}</span></div>
+      <button className="settings-button" type="button" onClick={onOpenSettings}>Settings</button>
     </header>
   )
 }

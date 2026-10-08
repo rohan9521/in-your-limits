@@ -1,12 +1,8 @@
 import { useCallback, useState } from 'react'
-import { PROVIDERS } from './config/providers'
-import { ConnectionBanner } from './components/ConnectionBanner'
 import { AnalyticsPanel } from './components/AnalyticsPanel'
-import { NextSteps } from './components/NextSteps'
 import { RequestComposer } from './components/RequestComposer'
 import { SettingsModal } from './components/SettingsModal'
 import { Sidebar } from './components/Sidebar'
-import { StatsGrid } from './components/StatsGrid'
 import { Topbar } from './components/Topbar'
 import { ViewTabs } from './components/ViewTabs'
 import { useChatRequest } from './hooks/useChatRequest'
@@ -51,22 +47,24 @@ export function App() {
     connections.saveSettings(settingsDraft)
     setSettingsOpen(false)
     setSettingsDraft(null)
-    chat.showNotice('Connections saved. Automatic routing will use the first available provider.')
+    chat.showNotice('Connections saved. Your selected provider will be tried first, with failover to other connected providers.')
   }
 
   return (
-    <div className="app-shell">
+    <div className="app-shell chat-app-shell">
       <Sidebar activeView={activeView} onViewChange={setActiveView} onOpenSettings={openSettings} />
-      <main className="main-content">
+      <main className="main-content chat-main">
         <Topbar activeView={activeView} onOpenSettings={openSettings} />
         <ViewTabs activeView={activeView} onViewChange={setActiveView} />
-        {activeView === 'overview' ? <>
-          <ConnectionBanner localModel={connections.localModel} localUrl={connections.localUrl} status={localModel.status} onRetry={localModel.retry} />
+        {activeView === 'overview' ? <section className="chat-page">
+          <div className="chat-meta">
+            <span className={`chat-local-status ${localModel.status}`}><i />Local compression {localModel.status === 'connected' ? 'on' : 'offline'}</span>
+            <span>{connections.connectedProviders.length} provider{connections.connectedProviders.length === 1 ? '' : 's'} connected</span>
+            {localModel.status !== 'connected' && <button type="button" onClick={localModel.retry}>Retry Ollama</button>}
+          </div>
           {chat.notice && <div className="notice" role="status">{chat.notice}</div>}
-          <StatsGrid connectedCount={connections.connectedProviders.length} providerCount={PROVIDERS.length} localStatus={localModel.status} localModel={connections.localModel} />
-          <RequestComposer prompt={prompt} provider={selectedProvider} busy={chat.busy} records={chat.records} onPromptChange={setPrompt} onProviderChange={setSelectedProvider} onSubmit={() => chat.submit({ prompt, provider: selectedProvider })} />
-          <NextSteps onOpenSettings={openSettings} />
-        </> : <AnalyticsPanel records={chat.records} onClear={chat.clearHistory} />}
+          <RequestComposer prompt={prompt} provider={selectedProvider} busy={chat.busy} records={chat.records} localModel={connections.localModel} onPromptChange={setPrompt} onProviderChange={setSelectedProvider} onSubmit={() => chat.submit({ prompt, provider: selectedProvider })} />
+        </section> : <AnalyticsPanel records={chat.records} onClear={chat.clearHistory} />}
       </main>
       {settingsOpen && settingsDraft && <SettingsModal settings={settingsDraft} onChangeSetting={updateDraftSetting} onChangeKey={updateDraftKey} onSave={saveConnections} onClose={closeSettings} />}
     </div>

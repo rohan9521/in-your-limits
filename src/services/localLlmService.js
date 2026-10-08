@@ -1,5 +1,18 @@
 function normalizeUrl(url) {
-  return url.trim().replace(/\/$/, "");
+  const value = url.trim();
+  const withProtocol = /^[a-z][a-z\d+.-]*:\/\//i.test(value)
+    ? value
+    : `http://${value}`;
+  let parsed;
+  try {
+    parsed = new URL(withProtocol);
+  } catch {
+    throw new Error(`Invalid Ollama URL: ${value || "(empty)"}`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("Ollama URL must use http:// or https://.");
+  }
+  return parsed.href.replace(/\/+$/, "");
 }
 
 export async function checkLocalModel(localUrl) {

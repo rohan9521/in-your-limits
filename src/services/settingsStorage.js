@@ -6,7 +6,7 @@ const STORAGE_KEYS = {
 
 const DEFAULTS = {
   localUrl: "http://localhost:11434",
-  localModel: "llama3.2:3b",
+  localModel: "llama3:8b",
 };
 
 function readJson(key, fallback) {
@@ -29,11 +29,19 @@ export function loadSettings(initialKeys) {
     ]),
   );
 
+  const storedLocalModel = localStorage.getItem(STORAGE_KEYS.localModel);
+  const localModel =
+    !storedLocalModel || storedLocalModel === "llama3.2:3b"
+      ? DEFAULTS.localModel
+      : storedLocalModel;
+  if (localModel !== storedLocalModel) {
+    localStorage.setItem(STORAGE_KEYS.localModel, localModel);
+  }
+
   return {
     keys,
     localUrl: localStorage.getItem(STORAGE_KEYS.localUrl) || DEFAULTS.localUrl,
-    localModel:
-      localStorage.getItem(STORAGE_KEYS.localModel) || DEFAULTS.localModel,
+    localModel,
   };
 }
 

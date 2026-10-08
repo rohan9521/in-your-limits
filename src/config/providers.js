@@ -14,10 +14,15 @@ export const PROVIDERS = [
   },
 ];
 
+export const CHAT_ROUTES = [
+  ...PROVIDERS,
+  { id: "local", name: "Local Ollama" },
+];
+
 export const INITIAL_KEYS = Object.fromEntries(
   PROVIDERS.map(({ id }) => [id, ""]),
 );
 
 export function getProviderName(providerId) {
-  return PROVIDERS.find(({ id }) => id === providerId)?.name || providerId;
+  return CHAT_ROUTES.find(({ id }) => id === providerId)?.name || providerId;
 }
